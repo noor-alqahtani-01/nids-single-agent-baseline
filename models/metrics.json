@@ -1,0 +1,57 @@
+{
+  "model": "RandomForestClassifier",
+  "params": {
+    "n_estimators": 100,
+    "max_depth": 25,
+    "min_samples_leaf": 2,
+    "class_weight": "balanced",
+    "random_state": 42
+  },
+  "train_rows": 994764,
+  "test_rows": 248691,
+  "train_seconds": 15.1,
+  "binary": {
+    "precision": 0.9979,
+    "recall": 0.9998,
+    "f1": 0.9989
+  },
+  "multiclass_accuracy": 0.9993,
+  "per_class_recall": {
+    "BENIGN": {
+      "recall": 0.9992,
+      "test_rows": 182507
+    },
+    "DDoS": {
+      "recall": 0.9999,
+      "test_rows": 25603
+    },
+    "DoS GoldenEye": {
+      "recall": 0.9995,
+      "test_rows": 2057
+    },
+    "DoS Hulk": {
+      "recall": 0.9994,
+      "test_rows": 34569
+    },
+    "DoS Slowhttptest": {
+      "recall": 0.9904,
+      "test_rows": 1046
+    },
+    "DoS slowloris": {
+      "recall": 0.9954,
+      "test_rows": 1077
+    },
+    "FTP-Patator": {
+      "recall": 1.0,
+      "test_rows": 1186
+    },
+    "Heartbleed": {
+      "recall": 1.0,
+      "test_rows": 2
+    },
+    "SSH-Patator": {
+      "recall": 0.9969,
+      "test_rows": 644
+    }
+  }
+}
