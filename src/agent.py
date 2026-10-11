@@ -14,6 +14,7 @@ falls back to a template sentence and keeps going.
 
 import json
 import os
+import time
 import urllib.error
 import urllib.request
 from pathlib import Path
@@ -72,15 +73,21 @@ class LLMClient:
         )
 
     def complete(self, user_message: str) -> str:
-        body = json.dumps({
+        payload = {
             "model": self.model,
             "temperature": 0,
-            "max_tokens": 120,
+            # Generous cap: "thinking" models spend tokens before they answer.
+            "max_tokens": int(os.environ.get("LLM_MAX_TOKENS", "4000")),
             "messages": [
                 {"role": "system", "content": SYSTEM_PROMPT},
                 {"role": "user", "content": user_message},
             ],
-        }).encode()
+        }
+        # Optional, for thinking models (for example "low"): faster replies.
+        effort = os.environ.get("LLM_REASONING_EFFORT", "")
+        if effort:
+            payload["reasoning_effort"] = effort
+        body = json.dumps(payload).encode()
         request = urllib.request.Request(
             f"{self.base_url}/chat/completions",
             data=body,
@@ -89,9 +96,22 @@ class LLMClient:
                 "Authorization": f"Bearer {self.api_key}",
             },
         )
-        with urllib.request.urlopen(request, timeout=30) as response:
-            data = json.loads(response.read())
-        return data["choices"][0]["message"]["content"].strip()
+        # Free API tiers limit requests per minute: wait and retry on HTTP 429.
+        wait = float(os.environ.get("LLM_RETRY_WAIT", "20"))
+        for attempt in range(4):
+            try:
+                with urllib.request.urlopen(request, timeout=30) as response:
+                    data = json.loads(response.read())
+                break
+            except urllib.error.HTTPError as err:
+                if err.code != 429 or attempt == 3:
+                    raise
+                print(f"          (rate limit reached, waiting {wait:.0f} s ...)", flush=True)
+                time.sleep(wait)
+        content = data["choices"][0]["message"].get("content")
+        if not content or not content.strip():
+            raise ValueError("the LLM returned an empty reply")
+        return " ".join(content.split())
 
 
 class NIDSAgent:
@@ -150,7 +170,7 @@ class NIDSAgent:
                          ("verdict", "attack_type", "confidence", "technique_id",
                           "technique_name", "key_features")}
                 return self.llm.complete(json.dumps(facts, default=str)), "llm"
-            except (urllib.error.URLError, TimeoutError, KeyError, ValueError, OSError) as err:
+            except Exception as err:  # any failure: keep the run going
                 # Stop calling the LLM after the first failure so the run finishes.
                 self.llm_active = False
                 self.llm_note = f"LLM call failed ({err}); switched to template reasons."
