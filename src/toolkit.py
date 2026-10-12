@@ -12,6 +12,7 @@ Tools, grouped by the role that uses them in the multi-agent design:
     Remediation   submit_triage (response)
 """
 
+import json
 import time
 from pathlib import Path
 
@@ -191,6 +192,33 @@ class CoEvolutionEnv:
                     out[f] = (v, v)
         return out
 
+    @staticmethod
+    def _normalize(changes):
+        """Accept the shapes LLMs actually send: a JSON string, a {feature: value}
+        dict, or a list of {feature, value}; values given as numeric strings."""
+        if isinstance(changes, str):
+            try:
+                changes = json.loads(changes)
+            except json.JSONDecodeError:
+                return []
+        if isinstance(changes, dict):
+            changes = [{"feature": k, "value": v} for k, v in changes.items()]
+        out = []
+        for c in changes or []:
+            if isinstance(c, str):
+                try:
+                    c = json.loads(c)
+                except json.JSONDecodeError:
+                    continue
+            if not isinstance(c, dict):
+                continue
+            try:
+                value = float(c.get("value"))
+            except (TypeError, ValueError):
+                value = None
+            out.append({"feature": c.get("feature"), "value": value})
+        return out
+
     def _visible(self, flow):
         return {f: _num(flow[f]) for f in self.mutable}
 
@@ -228,7 +256,8 @@ class CoEvolutionEnv:
             return {"error": "This seed already evaded. Call get_attack_seed or retrain_detector."}
         if seed["attempts"] >= self.attempts_per_seed:
             return {"error": "No attempts left for this seed. Call get_attack_seed or retrain_detector."}
-        valid = [c for c in (changes or []) if c.get("feature") in self.mutable]
+        changes = self._normalize(changes)
+        valid = [c for c in changes if c.get("feature") in self.mutable]
         if len({c["feature"] for c in valid}) > self.max_changes:
             return {"error": f"Too many features changed: at most {self.max_changes} per attempt, "
                              "so the attack keeps its function. This attempt was not counted."}
@@ -236,7 +265,7 @@ class CoEvolutionEnv:
         applied, ignored, clipped = {}, [], []
         for ch in changes or []:
             f, v = ch.get("feature"), ch.get("value")
-            if f not in self.mutable or not isinstance(v, (int, float)):
+            if f not in self.mutable or v is None:
                 ignored.append(f)
                 continue
             lo, hi = seed["bounds"][f]
