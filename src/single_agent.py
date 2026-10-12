@@ -28,6 +28,7 @@ from pathlib import Path
 
 import numpy as np
 
+from display import Display
 from llm import LLM
 from toolkit import SEVERITIES, CoEvolutionEnv
 
@@ -114,36 +115,11 @@ def call_tool(env, name, args):
         return {"error": f"{type(err).__name__}: {err}"}
 
 
+DISPLAY = None  # set in main()
+
+
 def show(name, args, result):
-    tag = ROLE.get(name, "AGENT    ")
-    if "error" in result:
-        print(f"  [{tag}] {name}: {result['error']}")
-    elif name == "get_attack_seed":
-        print(f"  [{tag}] seed {result['seed_id']}: {result['attack_type']} ({result['technique']})")
-    elif name == "submit_variant":
-        changes = ", ".join(f"{k}={v}" for k, v in result["applied"].items()) or "no valid changes"
-        if result["evaded"]:
-            print(f"  [{tag}] seed {result['seed_id']} try: {changes}")
-            print(f"  [DETECTION] -> EVADED: classified benign ({result['confidence']:.2f})")
-        else:
-            why = "; ".join(f"{r['feature']}={r['value']}" for r in result.get("rejection_reason", []))
-            print(f"  [{tag}] seed {result['seed_id']} try: {changes}")
-            print(f"  [DETECTION] -> caught as {result['predicted_class']} ({result['confidence']:.2f}); "
-                  f"reason: {why}")
-    elif name == "retrain_detector":
-        print(f"  [{tag}] round {result['round_finished']} done: ESR {result['round_esr']:.2f}; "
-              f"retrained with {result['evasions_added_to_training']} evasions; "
-              f"still evading {result['evasions_still_evading_after_retrain']}; "
-              f"test F1 {result['test_f1_after_retrain']:.4f}")
-    elif name == "triage_alerts":
-        print(f"  [{tag}] {len(result['alerts'])} alerts in {result['incoming_flows_checked']} incoming flows")
-    elif name == "submit_triage":
-        for d in args.get("decisions", []):
-            print(f"  [{tag}] alert {d.get('alert_id')}: {d.get('severity')} -> {d.get('response')}")
-        if "problems" in result:
-            print(f"  [{tag}] problems: {result['problems']}")
-    elif name == "finish":
-        print(f"  [{tag}] finished: {args.get('summary', '')}")
+    DISPLAY.show(name, args, result)
 
 
 def run_llm(env, max_steps):
@@ -159,12 +135,12 @@ def run_llm(env, max_steps):
         try:
             msg = llm.chat(messages, TOOLS)
         except Exception as err:  # quota, network, API error: stop and report what was done
-            print(f"  [AGENT    ] stopped: {err}")
+            print(DISPLAY.yellow(f"   ! Agent stopped: {err}"))
             break
         messages.append(msg)  # kept whole: some APIs need their extra fields back
         calls = msg.get("tool_calls") or []
         if msg.get("content") and str(msg["content"]).strip():
-            print(f"  [AGENT    ] {' '.join(str(msg['content']).split())[:200]}")
+            DISPLAY.note("agent: " + " ".join(str(msg["content"]).split())[:200])
         if not calls:
             if env.done or nudges >= 2:
                 break
@@ -240,6 +216,7 @@ def main():
     p.add_argument("--max-changes", type=int, default=3, help="features changed per attempt")
     p.add_argument("--max-factor", type=float, default=2.0,
                    help="each feature stays within this factor of its original value")
+    p.add_argument("--no-color", action="store_true", help="plain text output")
     a = p.parse_args()
 
     start = time.time()
@@ -247,11 +224,11 @@ def main():
     env = CoEvolutionEnv(rounds=a.rounds, seeds_per_round=a.seeds, attempts_per_seed=a.attempts,
                          triage_flows=a.triage, seed=a.seed,
                          max_changes=a.max_changes, max_factor=a.max_factor)
-    print(f"Single-agent baseline | policy: {a.policy} | {a.rounds} round(s), {a.seeds} seed(s)/round, "
-          f"{a.attempts} attempts/seed | at most {a.max_changes} features changed, "
-          f"each within x{a.max_factor:g} of the original")
-    print(f"Starting detector (static): test F1 {env.history[0]['test_f1']:.4f}")
-    print("-" * 86)
+    global DISPLAY
+    DISPLAY = Display(env, color=False if a.no_color else None)
+    DISPLAY.header(a.policy, {"rounds": a.rounds, "seeds": a.seeds, "attempts": a.attempts,
+                              "max_changes": a.max_changes, "max_factor": a.max_factor},
+                   env.history[0]["test_f1"])
     llm_calls = run_llm(env, a.max_steps) if a.policy == "llm" else run_random(env, a.seed)
     seconds = round(time.time() - start, 1)
 
@@ -263,24 +240,7 @@ def main():
     OUT_DIR.mkdir(exist_ok=True)
     (OUT_DIR / f"single_agent_{a.policy}_report.json").write_text(json.dumps(rep, indent=2, default=str))
 
-    print("=" * 86)
-    print("SINGLE-AGENT BASELINE REPORT")
-    print(f"  {'Round':<28}{'Attempts':>9}{'Evasions':>10}{'ESR':>8}{'Test F1':>10}")
-    for h in rep["rounds"]:
-        if h["round"] == 0:
-            print(f"  {'0 static detector':<28}{'-':>9}{'-':>10}{'-':>8}{h['test_f1']:>10.4f}")
-        else:
-            print(f"  {h['round']:<28}{h['attempts']:>9}{h['evasions']:>10}{h['esr']:>8.2f}{h['test_f1']:>10.4f}")
-    if rep["esr_overall"] is not None:
-        print(f"  Overall ESR: {rep['esr_overall']:.2f}   attempts to first evasion: {rep['atfe_run'] or 'none'}")
-    if rep["triage"]:
-        correct = sum(1 for t in rep["triage"] if t.get("true_label") == t["predicted_class"])
-        print(f"  Triage: {len(rep['triage'])} alerts, {correct} with the correct attack class, "
-              f"{sum(1 for t in rep['triage'] if t.get('severity'))} given severity and response")
-    print(f"  Finished by the agent: {'yes' if rep['finished_by_agent'] else 'no (stopped early: see the messages above)'}")
-    print(f"  LLM calls: {llm_calls}   Time: {seconds} s")
-    print(f"  Saved outputs/single_agent_{a.policy}_report.json")
-
+    DISPLAY.report(rep, a.policy, llm_calls, seconds, f"outputs/single_agent_{a.policy}_report.json")
 
 if __name__ == "__main__":
     main()

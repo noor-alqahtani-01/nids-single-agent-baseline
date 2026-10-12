@@ -87,30 +87,34 @@ python src/single_agent.py
 
 ### Expected output
 
-One line per action, tagged with the role, then the report:
+Each phase gets a heading. Every try shows the change as old -> new with units, the detector's verdict, and why it was caught. The run ends with a table and a plain-language summary:
 
 ```
-  [RED TEAM ] seed 1: DoS slowloris (T1499 Endpoint Denial of Service)
-  [RED TEAM ] seed 1 try: Flow Duration=60000000, Total Fwd Packets=10
-  [DETECTION] -> caught as DoS slowloris (0.78); reason: Fwd Header Length=330.667; ...
-  ...
-  [ORCHESTR.] round 1 done: ESR 0.00; retrained with 0 evasions; ...
-  [RISK+REM.] alert 4: critical -> Activate DDoS mitigation scrubbing center ...
-======================================================================================
-SINGLE-AGENT BASELINE REPORT
-  Round                        Attempts  Evasions     ESR   Test F1
-  0 static detector                   -         -       -    0.9986
-  1                                   8         0    0.00    0.9986
-  2                                   8         0    0.00    0.9986
-  Overall ESR: 0.00   attempts to first evasion: none
-  Triage: 7 alerts, 7 with the correct attack class, 7 given severity and response
-  Finished by the agent: yes
-  LLM calls: 26   Time: 40.0 s
+ ROUND 1 of 2: attack and defend
+ Attack 1: DoS slowloris  (T1499 Endpoint Denial of Service)
+   [RED TEAM]  try 1: duration 51.8 s -> 60.0 s; packets sent 15 -> 10
+   [DETECTOR]  CAUGHT as DoS slowloris (confidence 0.78)
+               why: header bytes sent is 331 B (benign: ... , attacker cannot change it); ...
+ [ORCHESTRATOR] Round 1 result: 0 of 8 tries evaded (ESR 0%)
+ OPERATIONS: triage new traffic
+   Alert Detected as       Technique Severity  Response
+   4     DDoS              T1498     CRITICAL  Activate DDoS mitigation ...
+ REPORT
+   Round                   Tries  Evaded     ESR   Test F1
+   0 (static detector)         -       -       -    0.9986
+   1                           8       0      0%    0.9986
+   2                           8       0      0%    0.9986
+ What this means
+   - The detector caught all 16 attack variants (ESR 0%).
+   - Detection quality on normal test traffic: F1 0.9986 before, 0.9986 after.
+   - 7 new alerts: 7 with the correct attack type, 7 given a severity and a response.
 ```
+
+Add `--no-color` for plain text (for example when saving the output to a file).
 
 The full report is saved to `outputs/single_agent_llm_report.json` (or `..._random_report.json`).
 
-## Baseline results (first run, seed 42)
+## Baseline results (seed 42)
 
 | | LLM single agent | Random mutation |
 | --- | --- | --- |
@@ -119,8 +123,8 @@ The full report is saved to `outputs/single_agent_llm_report.json` (or `..._rand
 | ESR | 0.00 | 0.00 |
 | Test F1 before / after | 0.9986 / 0.9986 | 0.9986 / 0.9986 |
 | Alerts triaged with severity and response | 7 of 7 | 7 of 7 (rules) |
-| LLM calls | 26 | 0 |
-| Time | 40 s | 3.5 s |
+| LLM calls | 25 | 0 |
+| Time | 78 s | 3.5 s |
 
 This is one run. Variance across three seeds is reported in M5.
 
@@ -186,6 +190,7 @@ src/
   single_agent.py         THE BASELINE: one LLM agent, all five roles
   toolkit.py              shared tools, data and budgets (also for the multi-agent system)
   llm.py                  OpenAI-compatible client with tool calls
+  display.py              readable terminal output and the run summary
   attack_map.py           attack label to ATT&CK technique
   prepare_data.py         clean and split the raw data
   train.py                train the static detector
