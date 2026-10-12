@@ -25,6 +25,10 @@ def load_env(path: Path = ROOT / ".env") -> None:
         os.environ.setdefault(key.strip(), value.strip().strip('"').strip("'"))
 
 
+class QuotaExhausted(RuntimeError):
+    """The provider's daily quota is used up: retrying will not help."""
+
+
 class LLM:
     def __init__(self) -> None:
         load_env()
@@ -56,9 +60,15 @@ class LLM:
                     data = json.loads(response.read())
                 break
             except urllib.error.HTTPError as err:
+                detail = err.read().decode(errors="replace")
+                daily = err.code == 429 and ("PerDay" in detail or "per day" in detail.lower())
+                if daily:
+                    raise QuotaExhausted(
+                        "The API's daily free quota for this model is used up. It resets at "
+                        "midnight Pacific time. Use another model in .env (each model has its own "
+                        "quota), enable billing, or run with --policy random.") from err
                 if err.code not in (429, 500, 503) or attempt == 4:
-                    detail = err.read().decode(errors="replace")[:400]
-                    raise RuntimeError(f"HTTP {err.code}: {detail}") from err
+                    raise RuntimeError(f"HTTP {err.code}: {detail[:400]}") from err
                 print(f"   (API busy or rate limit reached, waiting {self.wait:.0f} s ...)", flush=True)
                 time.sleep(self.wait)
         self.calls += 1

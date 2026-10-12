@@ -44,7 +44,8 @@ SYSTEM_PROMPT = """You are a single autonomous cyber-defense agent. You perform 
 Procedure:
 1. For each co-evolution round: call get_attack_seed, then call submit_variant with feature changes.
    After each rejection, study rejection_reason and change your strategy. Use only mutable features,
-   inside allowed_ranges. Stop a seed when it evades or has no attempts left, then take the next seed.
+   inside the seed's allowed_ranges, and change at most max_features_changed_per_attempt features per
+   attempt: the variant must remain a working attack, not become benign traffic. Stop a seed when it evades or has no attempts left, then take the next seed.
    When the round's seed budget is used, call retrain_detector.
 2. After the last round, call triage_alerts, decide severity and response for every alert, and call
    submit_triage once with all decisions.
@@ -155,7 +156,11 @@ def run_llm(env, max_steps):
     messages = [{"role": "system", "content": SYSTEM_PROMPT}, {"role": "user", "content": task}]
     nudges = 0
     for _ in range(max_steps):
-        msg = llm.chat(messages, TOOLS)
+        try:
+            msg = llm.chat(messages, TOOLS)
+        except Exception as err:  # quota, network, API error: stop and report what was done
+            print(f"  [AGENT    ] stopped: {err}")
+            break
         messages.append(msg)  # kept whole: some APIs need their extra fields back
         calls = msg.get("tool_calls") or []
         if msg.get("content") and str(msg["content"]).strip():
@@ -192,10 +197,13 @@ def run_random(env, seed):
             if "error" in s:
                 break
             for _ in range(env.attempts_per_seed):
-                feats = rng.choice(env.mutable, size=int(rng.integers(1, 4)), replace=False)
+                bounds = env.seeds[s["seed_id"]]["bounds"]
+                movable = [f for f in env.mutable if bounds[f][0] < bounds[f][1]]
+                k = int(rng.integers(1, min(env.max_changes, len(movable)) + 1)) if movable else 0
+                feats = rng.choice(movable, size=k, replace=False) if k else []
                 changes = []
                 for f in feats:
-                    lo, hi = env.bounds[f]
+                    lo, hi = bounds[f]
                     lo_l, hi_l = np.log1p(max(lo, 0)), np.log1p(max(hi, 0))
                     changes.append({"feature": str(f), "value": float(np.expm1(rng.uniform(lo_l, hi_l)))})
                 r = env.submit_variant(s["seed_id"], changes)
@@ -229,14 +237,19 @@ def main():
     p.add_argument("--triage", type=int, default=10, help="incoming flows to triage")
     p.add_argument("--max-steps", type=int, default=60, help="LLM turn limit")
     p.add_argument("--seed", type=int, default=42)
+    p.add_argument("--max-changes", type=int, default=3, help="features changed per attempt")
+    p.add_argument("--max-factor", type=float, default=2.0,
+                   help="each feature stays within this factor of its original value")
     a = p.parse_args()
 
     start = time.time()
     print("Preparing the environment (loading data, training the starting detector) ...")
     env = CoEvolutionEnv(rounds=a.rounds, seeds_per_round=a.seeds, attempts_per_seed=a.attempts,
-                         triage_flows=a.triage, seed=a.seed)
+                         triage_flows=a.triage, seed=a.seed,
+                         max_changes=a.max_changes, max_factor=a.max_factor)
     print(f"Single-agent baseline | policy: {a.policy} | {a.rounds} round(s), {a.seeds} seed(s)/round, "
-          f"{a.attempts} attempts/seed")
+          f"{a.attempts} attempts/seed | at most {a.max_changes} features changed, "
+          f"each within x{a.max_factor:g} of the original")
     print(f"Starting detector (static): test F1 {env.history[0]['test_f1']:.4f}")
     print("-" * 86)
     llm_calls = run_llm(env, a.max_steps) if a.policy == "llm" else run_random(env, a.seed)
@@ -245,7 +258,8 @@ def main():
     rep = env.report()
     rep.update({"policy": a.policy, "llm_calls": llm_calls, "seconds": seconds,
                 "config": {"rounds": a.rounds, "seeds_per_round": a.seeds,
-                           "attempts_per_seed": a.attempts, "seed": a.seed}})
+                           "attempts_per_seed": a.attempts, "seed": a.seed,
+                           "max_changes": a.max_changes, "max_factor": a.max_factor}})
     OUT_DIR.mkdir(exist_ok=True)
     (OUT_DIR / f"single_agent_{a.policy}_report.json").write_text(json.dumps(rep, indent=2, default=str))
 
@@ -263,7 +277,7 @@ def main():
         correct = sum(1 for t in rep["triage"] if t.get("true_label") == t["predicted_class"])
         print(f"  Triage: {len(rep['triage'])} alerts, {correct} with the correct attack class, "
               f"{sum(1 for t in rep['triage'] if t.get('severity'))} given severity and response")
-    print(f"  Finished by the agent: {'yes' if rep['finished_by_agent'] else 'no (turn limit)'}")
+    print(f"  Finished by the agent: {'yes' if rep['finished_by_agent'] else 'no (stopped early: see the messages above)'}")
     print(f"  LLM calls: {llm_calls}   Time: {seconds} s")
     print(f"  Saved outputs/single_agent_{a.policy}_report.json")
 

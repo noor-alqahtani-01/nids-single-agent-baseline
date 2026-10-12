@@ -35,7 +35,6 @@ MUTABLE = [
     "Total Backward Packets",
     "Total Length of Fwd Packets",
     "Total Length of Bwd Packets",
-    "Fwd Packet Length Mean",
     "Flow IAT Mean",
     "Flow IAT Max",
     "Fwd IAT Mean",
@@ -56,7 +55,8 @@ def _num(v):
 
 class CoEvolutionEnv:
     def __init__(self, rounds=2, seeds_per_round=2, attempts_per_seed=4,
-                 evasion_weight=50, triage_flows=10, seed=SEED):
+                 evasion_weight=50, triage_flows=10, seed=SEED,
+                 max_changes=3, max_factor=2.0):
         for name in ("train", "test"):
             if not (WORK_DIR / f"{name}.csv.gz").exists():
                 raise SystemExit(f"data/working/{name}.csv.gz not found. "
@@ -68,6 +68,8 @@ class CoEvolutionEnv:
         self.rounds, self.seeds_per_round = rounds, seeds_per_round
         self.attempts_per_seed, self.evasion_weight = attempts_per_seed, evasion_weight
         self.triage_n = triage_flows
+        # Functionality constraints: an attack must stay an attack.
+        self.max_changes, self.max_factor = max_changes, max_factor
         self.rng = np.random.default_rng(seed)
 
         X = self.train[self.features]
@@ -139,17 +141,55 @@ class CoEvolutionEnv:
         return reasons
 
     @staticmethod
-    def _recompute(flow):
-        """Keep rate features consistent with the counts and duration."""
-        seconds = max(float(flow.get("Flow Duration", 1)), 1.0) / 1e6
-        fwd, bwd = float(flow.get("Total Fwd Packets", 0)), float(flow.get("Total Backward Packets", 0))
-        lf, lb = float(flow.get("Total Length of Fwd Packets", 0)), float(flow.get("Total Length of Bwd Packets", 0))
-        for name, value in (("Flow Packets/s", (fwd + bwd) / seconds),
-                            ("Flow Bytes/s", (lf + lb) / seconds),
-                            ("Fwd Packets/s", fwd / seconds),
-                            ("Bwd Packets/s", bwd / seconds)):
+    def _recompute(flow, orig):
+        """Keep features that are computed from the counts, sizes and duration
+        consistent with them, so a mutation cannot leave tell-tale mismatches."""
+        def g(f, src=flow):
+            return float(src.get(f, 0) or 0)
+        seconds = max(g("Flow Duration"), 1.0) / 1e6
+        fwd, bwd = g("Total Fwd Packets"), g("Total Backward Packets")
+        lf, lb = g("Total Length of Fwd Packets"), g("Total Length of Bwd Packets")
+        ofwd, obwd = g("Total Fwd Packets", orig), g("Total Backward Packets", orig)
+        derived = {
+            "Flow Packets/s": (fwd + bwd) / seconds,
+            "Flow Bytes/s": (lf + lb) / seconds,
+            "Fwd Packets/s": fwd / seconds,
+            "Bwd Packets/s": bwd / seconds,
+            "Fwd Packet Length Mean": lf / fwd if fwd else 0.0,
+            "Avg Fwd Segment Size": lf / fwd if fwd else 0.0,
+            "Bwd Packet Length Mean": lb / bwd if bwd else 0.0,
+            "Avg Bwd Segment Size": lb / bwd if bwd else 0.0,
+            "Average Packet Size": (lf + lb) / (fwd + bwd) if fwd + bwd else 0.0,
+            "Packet Length Mean": (lf + lb) / (fwd + bwd) if fwd + bwd else 0.0,
+            "Subflow Fwd Packets": fwd,
+            "Subflow Bwd Packets": bwd,
+            "Subflow Fwd Bytes": lf,
+            "Subflow Bwd Bytes": lb,
+        }
+        # Header bytes grow with the number of packets.
+        for name in ("Fwd Header Length", "Fwd Header Length.1"):
+            if name in flow and ofwd:
+                derived[name] = g(name, orig) * fwd / ofwd
+        if "Bwd Header Length" in flow and obwd:
+            derived["Bwd Header Length"] = g("Bwd Header Length", orig) * bwd / obwd
+        for name, value in derived.items():
             if name in flow:
                 flow[name] = value
+
+    def _seed_bounds(self, flow):
+        """Allowed range per feature for one seed: within the data's 1st-99th
+        percentile AND within max_factor of the original value. A feature that
+        is zero or negative in the original (absent or unknown) stays fixed."""
+        out = {}
+        for f, (lo, hi) in self.bounds.items():
+            v = float(flow[f])
+            if v <= 0:
+                out[f] = (v, v)
+            else:
+                out[f] = (max(lo, v / self.max_factor), min(hi, v * self.max_factor))
+                if out[f][0] > out[f][1]:
+                    out[f] = (v, v)
+        return out
 
     def _visible(self, flow):
         return {f: _num(flow[f]) for f in self.mutable}
@@ -165,13 +205,16 @@ class CoEvolutionEnv:
         flow = self.seed_pool.pop()
         seed_id = len(self.seeds) + 1
         self.seeds[seed_id] = {"flow": flow, "attempts": 0, "evaded": False,
-                               "attack_type": flow["attack_type"], "round": self.round}
+                               "attack_type": flow["attack_type"], "round": self.round,
+                               "bounds": self._seed_bounds(flow)}
         self.round_seeds += 1
         tech = lookup_attack(flow["attack_type"])
         return {"seed_id": seed_id, "attack_type": flow["attack_type"],
                 "technique": f"{tech['technique_id']} {tech['technique_name']}",
                 "mutable_features": self._visible(flow),
-                "allowed_ranges": {f: [_num(lo), _num(hi)] for f, (lo, hi) in self.bounds.items()},
+                "allowed_ranges": {f: [_num(lo), _num(hi)]
+                                   for f, (lo, hi) in self.seeds[seed_id]["bounds"].items()},
+                "max_features_changed_per_attempt": self.max_changes,
                 "attempts_allowed": self.attempts_per_seed,
                 "detector_now_says": self._rejection_reason(flow)}
 
@@ -185,6 +228,10 @@ class CoEvolutionEnv:
             return {"error": "This seed already evaded. Call get_attack_seed or retrain_detector."}
         if seed["attempts"] >= self.attempts_per_seed:
             return {"error": "No attempts left for this seed. Call get_attack_seed or retrain_detector."}
+        valid = [c for c in (changes or []) if c.get("feature") in self.mutable]
+        if len({c["feature"] for c in valid}) > self.max_changes:
+            return {"error": f"Too many features changed: at most {self.max_changes} per attempt, "
+                             "so the attack keeps its function. This attempt was not counted."}
         flow = dict(seed["flow"])
         applied, ignored, clipped = {}, [], []
         for ch in changes or []:
@@ -192,13 +239,13 @@ class CoEvolutionEnv:
             if f not in self.mutable or not isinstance(v, (int, float)):
                 ignored.append(f)
                 continue
-            lo, hi = self.bounds[f]
+            lo, hi = seed["bounds"][f]
             nv = min(max(float(v), lo), hi)
             if nv != float(v):
                 clipped.append(f)
             flow[f] = int(round(nv)) if f in INTEGER else nv
             applied[f] = _num(flow[f])
-        self._recompute(flow)
+        self._recompute(flow, seed["flow"])
         predicted, confidence = self._classify(flow)
         evaded = predicted == BENIGN
         seed["attempts"] += 1
