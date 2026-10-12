@@ -1,6 +1,6 @@
 # NIDS Single-Agent Baseline
 
-M4 deliverable for the CPCS683 group project *Multi-Agent Cyber Defense System with LLM-Driven Adaptive Red-Team Co-Evolution*.
+ group project *Multi-Agent Cyber Defense System with LLM-Driven Adaptive Red-Team Co-Evolution*.
 
 This repository contains one defender agent for network intrusion detection. It reads network flow records, calls a classifier trained once on CICIDS2017, maps each detected attack to a MITRE ATT&CK technique, and writes an alert with a short reason. It is the static-defense control condition that later milestones are compared against.
 
