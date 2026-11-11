@@ -30,6 +30,7 @@ import numpy as np
 
 from display import Display
 from llm import LLM
+from mock_llm import MockLLM
 from toolkit import SEVERITIES, CoEvolutionEnv
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -122,8 +123,8 @@ def show(name, args, result):
     DISPLAY.show(name, args, result)
 
 
-def run_llm(env, max_steps):
-    llm = LLM()
+def run_llm(env, max_steps, mock=False):
+    llm = MockLLM(seed=env.detector_seed) if mock else LLM()
     if not llm.ready:
         raise SystemExit("The LLM is not configured: set LLM_BASE_URL, LLM_API_KEY and LLM_MODEL in .env,\n"
                          "or run without an LLM: python src/single_agent.py --policy random")
@@ -160,7 +161,7 @@ def run_llm(env, max_steps):
                              "name": name, "content": json.dumps(result, default=str)})
         if env.done:
             break
-    return llm.calls
+    return llm
 
 
 def run_random(env, seed):
@@ -213,9 +214,13 @@ def main():
     p.add_argument("--triage", type=int, default=10, help="incoming flows to triage")
     p.add_argument("--max-steps", type=int, default=60, help="LLM turn limit")
     p.add_argument("--seed", type=int, default=42)
-    p.add_argument("--max-changes", type=int, default=3, help="features changed per attempt")
-    p.add_argument("--max-factor", type=float, default=2.0,
+    p.add_argument("--max-changes", type=int, default=5, help="features changed per attempt")
+    p.add_argument("--max-factor", type=float, default=4.0,
                    help="each feature stays within this factor of its original value")
+    p.add_argument("--golden", action="store_true", help="use the fixed M5 golden set")
+    p.add_argument("--mock", action="store_true", help="scripted agent, no API key (testing only)")
+    p.add_argument("--detector-seed", type=int, default=None, help="Random Forest seed (default: --seed)")
+    p.add_argument("--out", default=None, help="path for the JSON report")
     p.add_argument("--no-color", action="store_true", help="plain text output")
     a = p.parse_args()
 
@@ -223,24 +228,34 @@ def main():
     print("Preparing the environment (loading data, training the starting detector) ...")
     env = CoEvolutionEnv(rounds=a.rounds, seeds_per_round=a.seeds, attempts_per_seed=a.attempts,
                          triage_flows=a.triage, seed=a.seed,
-                         max_changes=a.max_changes, max_factor=a.max_factor)
+                         max_changes=a.max_changes, max_factor=a.max_factor,
+                         golden=a.golden, detector_seed=a.detector_seed)
     global DISPLAY
     DISPLAY = Display(env, color=False if a.no_color else None)
     DISPLAY.header(a.policy, {"rounds": a.rounds, "seeds": a.seeds, "attempts": a.attempts,
                               "max_changes": a.max_changes, "max_factor": a.max_factor},
                    env.history[0]["test_f1"])
-    llm_calls = run_llm(env, a.max_steps) if a.policy == "llm" else run_random(env, a.seed)
+    if a.policy == "llm":
+        llm = run_llm(env, a.max_steps, mock=a.mock)
+        usage = llm.usage()
+    else:
+        run_random(env, a.seed)
+        usage = {"llm_calls": 0, "cost_usd": 0.0, "llm_seconds": 0.0, "total_tokens": 0}
     seconds = round(time.time() - start, 1)
 
     rep = env.report()
-    rep.update({"policy": a.policy, "llm_calls": llm_calls, "seconds": seconds,
-                "config": {"rounds": a.rounds, "seeds_per_round": a.seeds,
-                           "attempts_per_seed": a.attempts, "seed": a.seed,
+    rep.update({"policy": a.policy, "condition": "single_agent", "llm_calls": usage["llm_calls"],
+                "usage": usage, "seconds": seconds,
+                "config": {"rounds": env.rounds, "seeds_per_round": env.seeds_per_round,
+                           "attempts_per_seed": a.attempts, "seed": a.seed, "golden": a.golden,
+                           "detector_seed": env.detector_seed, "mock": a.mock,
                            "max_changes": a.max_changes, "max_factor": a.max_factor}})
     OUT_DIR.mkdir(exist_ok=True)
-    (OUT_DIR / f"single_agent_{a.policy}_report.json").write_text(json.dumps(rep, indent=2, default=str))
+    out = Path(a.out) if a.out else OUT_DIR / f"single_agent_{a.policy}_report.json"
+    out.parent.mkdir(parents=True, exist_ok=True)
+    out.write_text(json.dumps(rep, indent=2, default=str))
 
-    DISPLAY.report(rep, a.policy, llm_calls, seconds, f"outputs/single_agent_{a.policy}_report.json")
+    DISPLAY.report(rep, a.policy, usage["llm_calls"], seconds, str(out))
 
 if __name__ == "__main__":
     main()

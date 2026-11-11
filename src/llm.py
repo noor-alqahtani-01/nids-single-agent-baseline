@@ -38,6 +38,13 @@ class LLM:
         self.effort = os.environ.get("LLM_REASONING_EFFORT", "")
         self.wait = float(os.environ.get("LLM_RETRY_WAIT", "20"))
         self.calls = 0
+        self.prompt_tokens = 0
+        self.completion_tokens = 0
+        self.seconds = 0.0          # time spent waiting for the API (latency)
+        self.retries = 0
+        # Optional prices in USD per 1M tokens (0 on the free tier).
+        self.price_in = float(os.environ.get("LLM_PRICE_IN_PER_M", "0") or 0)
+        self.price_out = float(os.environ.get("LLM_PRICE_OUT_PER_M", "0") or 0)
         self.ready = bool(self.base_url and self.api_key and self.model)
 
     def chat(self, messages: list, tools: list | None = None) -> dict:
@@ -56,8 +63,10 @@ class LLM:
         )
         for attempt in range(5):
             try:
+                t0 = time.time()
                 with urllib.request.urlopen(request, timeout=120) as response:
                     data = json.loads(response.read())
+                self.seconds += time.time() - t0
                 break
             except urllib.error.HTTPError as err:
                 detail = err.read().decode(errors="replace")
@@ -69,7 +78,19 @@ class LLM:
                         "quota), enable billing, or run with --policy random.") from err
                 if err.code not in (429, 500, 503) or attempt == 4:
                     raise RuntimeError(f"HTTP {err.code}: {detail[:400]}") from err
+                self.retries += 1
                 print(f"   (API busy or rate limit reached, waiting {self.wait:.0f} s ...)", flush=True)
                 time.sleep(self.wait)
         self.calls += 1
+        usage = data.get("usage") or {}
+        self.prompt_tokens += int(usage.get("prompt_tokens") or 0)
+        self.completion_tokens += int(usage.get("completion_tokens") or 0)
         return data["choices"][0]["message"]
+
+    def usage(self) -> dict:
+        cost = (self.prompt_tokens * self.price_in + self.completion_tokens * self.price_out) / 1e6
+        return {"llm_calls": self.calls, "prompt_tokens": self.prompt_tokens,
+                "completion_tokens": self.completion_tokens,
+                "total_tokens": self.prompt_tokens + self.completion_tokens,
+                "cost_usd": round(cost, 4), "llm_seconds": round(self.seconds, 1),
+                "rate_limit_retries": self.retries, "model": self.model}

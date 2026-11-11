@@ -19,7 +19,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 from sklearn.ensemble import RandomForestClassifier
-from sklearn.metrics import f1_score
+from sklearn.metrics import f1_score, precision_score, recall_score
 
 from attack_map import lookup_attack
 
@@ -57,7 +57,11 @@ def _num(v):
 class CoEvolutionEnv:
     def __init__(self, rounds=2, seeds_per_round=2, attempts_per_seed=4,
                  evasion_weight=50, triage_flows=10, seed=SEED,
-                 max_changes=3, max_factor=2.0):
+                 max_changes=5, max_factor=4.0, golden=False, detector_seed=None):
+        """golden=True: use the fixed M5 golden set (data/golden/) instead of
+        random seeds: its rounds, cases per round and triage flows override
+        rounds, seeds_per_round and triage_flows. detector_seed sets the
+        Random Forest's random_state (default: seed)."""
         for name in ("train", "test"):
             if not (WORK_DIR / f"{name}.csv.gz").exists():
                 raise SystemExit(f"data/working/{name}.csv.gz not found. "
@@ -66,6 +70,15 @@ class CoEvolutionEnv:
         self.test = pd.read_csv(WORK_DIR / "test.csv.gz")
         self.features = [c for c in self.train.columns if c not in ("attack_type", "label")]
         self.mutable = [f for f in MUTABLE if f in self.features]
+        self.golden = golden
+        self.detector_seed = seed if detector_seed is None else detector_seed
+        if golden:
+            import golden as golden_set
+            self.golden_rounds = golden_set.load_cases()
+            rounds = len(self.golden_rounds)
+            seeds_per_round = max(len(v) for v in self.golden_rounds.values())
+            self.triage_df = golden_set.load_triage()
+            triage_flows = len(self.triage_df)
         self.rounds, self.seeds_per_round = rounds, seeds_per_round
         self.attempts_per_seed, self.evasion_weight = attempts_per_seed, evasion_weight
         self.triage_n = triage_flows
@@ -84,16 +97,22 @@ class CoEvolutionEnv:
         self.detector = self._fit([])
         self.top_features = [self.features[i] for i in
                              np.argsort(self.detector.feature_importances_)[::-1][:20]]
-        f1_0 = self._test_f1()
+        m0 = self._test_metrics()
 
         # Attack seeds: held-out attack flows the starting detector catches.
         attacks = self.test[self.test["attack_type"] != BENIGN]
         pred = self.detector.predict(attacks[self.features])
         caught = attacks[pred != BENIGN]
         self.seed_pool = caught.sample(frac=1, random_state=seed).to_dict(orient="records")
+        if golden:  # every case must start detected; record any that a seed misses
+            self.golden_missed_at_start = [
+                c["case_id"] for cs in self.golden_rounds.values() for c in cs
+                if self._classify(c)[0] == BENIGN]
 
         self.round = 1
-        self.history = [{"round": 0, "label": "static (no adaptation)", "test_f1": f1_0}]
+        self.history = [{"round": 0, "label": "static (no adaptation)", **m0}]
+        self.tool_errors = []        # protocol errors: wrong tool order, bad arguments
+        self.attempt_log = []        # one row per attack attempt (failure analysis)
         self.seeds, self.variants, self.evasions = {}, {}, []
         self.round_attempts, self.round_evasions, self.round_seeds = 0, 0, 0
         self.total_attempts = 0
@@ -112,13 +131,26 @@ class CoEvolutionEnv:
             X = pd.concat([X, ev], ignore_index=True)
             y = np.concatenate([y, np.array([e["attack_type"] for e in evasions], dtype=object)])
             w = np.concatenate([w, np.full(len(ev), float(self.evasion_weight))])
-        model = RandomForestClassifier(**DETECTOR_PARAMS)
+        model = RandomForestClassifier(**{**DETECTOR_PARAMS, "random_state": self.detector_seed})
         model.fit(X, y, sample_weight=w)
         return model
 
+    def _test_metrics(self):
+        """Detector quality on the held-out test set (attack vs benign)."""
+        pred = (self.detector.predict(self.test[self.features]) != BENIGN).astype(int)
+        y = self.test["label"].to_numpy()
+        fp = int(((pred == 1) & (y == 0)).sum())
+        return {"test_f1": round(float(f1_score(y, pred)), 4),
+                "test_precision": round(float(precision_score(y, pred)), 4),
+                "test_recall": round(float(recall_score(y, pred)), 4),
+                "test_fpr": round(fp / max(int((y == 0).sum()), 1), 4)}
+
     def _test_f1(self):
-        pred = self.detector.predict(self.test[self.features])
-        return round(float(f1_score(self.test["label"], (pred != BENIGN).astype(int))), 4)
+        return self._test_metrics()["test_f1"]
+
+    def _err(self, tool, message):
+        self.tool_errors.append({"tool": tool, "round": self.round, "error": message})
+        return {"error": message}
 
     def _classify(self, flow):
         x = pd.DataFrame([[flow[f] for f in self.features]], columns=self.features)
@@ -225,14 +257,22 @@ class CoEvolutionEnv:
     # ------------------------------------------------------------------ tools
     def get_attack_seed(self):
         if self.done or self.round > self.rounds:
-            return {"error": "All co-evolution rounds are finished. Call triage_alerts next."}
+            return self._err("get_attack_seed", "All co-evolution rounds are finished. Call triage_alerts next.")
         if self.round_seeds >= self.seeds_per_round:
-            return {"error": f"Seed budget for round {self.round} is used up. Call retrain_detector."}
-        if not self.seed_pool:
-            return {"error": "No attack seeds left. Call retrain_detector."}
-        flow = self.seed_pool.pop()
+            return self._err("get_attack_seed", f"Seed budget for round {self.round} is used up. Call retrain_detector.")
+        if self.golden:
+            pool = self.golden_rounds.get(self.round, [])
+            if self.round_seeds >= len(pool):
+                return self._err("get_attack_seed", f"Seed budget for round {self.round} is used up. "
+                                 "Call retrain_detector.")
+            flow = dict(pool[self.round_seeds])
+        elif not self.seed_pool:
+            return self._err("get_attack_seed", "No attack seeds left. Call retrain_detector.")
+        else:
+            flow = self.seed_pool.pop()
         seed_id = len(self.seeds) + 1
         self.seeds[seed_id] = {"flow": flow, "attempts": 0, "evaded": False,
+                               "case_id": flow.get("case_id"),
                                "attack_type": flow["attack_type"], "round": self.round,
                                "bounds": self._seed_bounds(flow)}
         self.round_seeds += 1
@@ -249,18 +289,18 @@ class CoEvolutionEnv:
     def submit_variant(self, seed_id, changes):
         seed = self.seeds.get(int(seed_id)) if str(seed_id).isdigit() else None
         if seed is None:
-            return {"error": f"Unknown seed_id {seed_id}. Call get_attack_seed first."}
+            return self._err("submit_variant", f"Unknown seed_id {seed_id}. Call get_attack_seed first.")
         if seed["round"] != self.round:
-            return {"error": "This seed belongs to an earlier round. Call get_attack_seed."}
+            return self._err("submit_variant", "This seed belongs to an earlier round. Call get_attack_seed.")
         if seed["evaded"]:
-            return {"error": "This seed already evaded. Call get_attack_seed or retrain_detector."}
+            return self._err("submit_variant", "This seed already evaded. Call get_attack_seed or retrain_detector.")
         if seed["attempts"] >= self.attempts_per_seed:
-            return {"error": "No attempts left for this seed. Call get_attack_seed or retrain_detector."}
+            return self._err("submit_variant", "No attempts left for this seed. Call get_attack_seed or retrain_detector.")
         changes = self._normalize(changes)
         valid = [c for c in changes if c.get("feature") in self.mutable]
         if len({c["feature"] for c in valid}) > self.max_changes:
-            return {"error": f"Too many features changed: at most {self.max_changes} per attempt, "
-                             "so the attack keeps its function. This attempt was not counted."}
+            return self._err("submit_variant", f"Too many features changed: at most {self.max_changes} per attempt, "
+                             "so the attack keeps its function. This attempt was not counted.")
         flow = dict(seed["flow"])
         applied, ignored, clipped = {}, [], []
         for ch in changes or []:
@@ -291,6 +331,14 @@ class CoEvolutionEnv:
             result["ignored_changes"] = ignored
         if clipped:
             result["clipped_to_allowed_range"] = clipped
+        reason = None if evaded else self._rejection_reason(flow)
+        self.attempt_log.append({
+            "round": self.round, "seed_id": int(seed_id), "case_id": seed.get("case_id"),
+            "attack_type": seed["attack_type"], "attempt": seed["attempts"],
+            "features_changed": sorted(applied), "clipped": len(clipped), "ignored": len(ignored),
+            "evaded": evaded, "predicted_class": predicted, "confidence": confidence,
+            "top_reason": reason[0]["feature"] if reason else None,
+            "top_reason_mutable": reason[0]["attacker_can_change"] if reason else None})
         if evaded:
             seed["evaded"] = True
             self.round_evasions += 1
@@ -300,14 +348,14 @@ class CoEvolutionEnv:
             if self.first_evasion_attempt is None:
                 self.first_evasion_attempt = self.total_attempts
         else:
-            result["rejection_reason"] = self._rejection_reason(flow)
+            result["rejection_reason"] = reason
         return result
 
     def retrain_detector(self):
         if self.round > self.rounds:
-            return {"error": "All rounds are finished. Call triage_alerts."}
+            return self._err("retrain_detector", "All rounds are finished. Call triage_alerts.")
         if self.round_attempts == 0:
-            return {"error": "No attack attempts in this round yet. Call get_attack_seed first."}
+            return self._err("retrain_detector", "No attack attempts in this round yet. Call get_attack_seed first.")
         start = time.time()
         esr = round(self.round_evasions / self.round_attempts, 4)
         self.detector = self._fit(self.evasions)
@@ -315,9 +363,10 @@ class CoEvolutionEnv:
         for e in self.evasions:
             if self._classify(e["flow"])[0] == BENIGN:
                 still += 1
-        f1 = self._test_f1()
+        metrics = self._test_metrics()
+        f1 = metrics["test_f1"]
         self.history.append({"round": self.round, "attempts": self.round_attempts,
-                             "evasions": self.round_evasions, "esr": esr, "test_f1": f1,
+                             "evasions": self.round_evasions, "esr": esr, **metrics,
                              "evasions_total": len(self.evasions),
                              "still_evading_after_retrain": still,
                              "retrain_seconds": round(time.time() - start, 1)})
@@ -333,8 +382,12 @@ class CoEvolutionEnv:
 
     def triage_alerts(self):
         if self.round <= self.rounds:
-            return {"error": f"Co-evolution round {self.round} is not finished. Retrain first."}
-        flows = pd.read_csv(SAMPLE_FLOWS).head(self.triage_n)
+            return self._err("triage_alerts", f"Co-evolution round {self.round} is not finished. Retrain first.")
+        flows = self.triage_df if self.golden else pd.read_csv(SAMPLE_FLOWS).head(self.triage_n)
+        self.triage_truth = [{"alert_id": i, "true_label": r["attack_type"],
+                              "ref_severity": r.get("ref_severity"),
+                              "ref_response_keywords": r.get("ref_response_keywords")}
+                             for i, r in enumerate(flows.to_dict(orient="records"), start=1)]
         alerts = []
         for i, row in enumerate(flows.to_dict(orient="records"), start=1):
             predicted, confidence = self._classify(row)
@@ -354,7 +407,7 @@ class CoEvolutionEnv:
 
     def submit_triage(self, decisions):
         if self.triage_alerts_list is None:
-            return {"error": "Call triage_alerts first."}
+            return self._err("submit_triage", "Call triage_alerts first.")
         ids = {a["alert_id"] for a in self.triage_alerts_list}
         clean, problems = [], []
         for d in decisions or []:
@@ -391,6 +444,14 @@ class CoEvolutionEnv:
             "atfe_run": self.first_evasion_attempt,
             "atfe_mean_per_evading_seed": round(float(np.mean(per_seed)), 2) if per_seed else None,
             "seeds_used": len(self.seeds),
+            "cases": [{"seed_id": k, "case_id": v.get("case_id"), "round": v["round"],
+                       "attack_type": v["attack_type"], "attempts": v["attempts"],
+                       "evaded": v["evaded"]} for k, v in self.seeds.items()],
+            "attempt_log": self.attempt_log,
+            "tool_errors": self.tool_errors,
+            "triage_truth": getattr(self, "triage_truth", None),
+            "golden": self.golden, "detector_seed": self.detector_seed,
+            "golden_missed_at_start": getattr(self, "golden_missed_at_start", None),
             "triage": [{**a, **next((d for d in (self.triage_decisions or [])
                                      if d["alert_id"] == a["alert_id"]), {})}
                        for a in (self.triage_alerts_list or [])],

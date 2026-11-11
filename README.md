@@ -130,6 +130,44 @@ This is one run. Variance across three seeds is reported in M5.
 
 **Reading the result.** Under the constraints above, neither policy evaded the detector. The rejection reasons show why: the detector relies most on features the attacker cannot change in our threat model, such as the maximum packet size the server sends back (`Max Packet Length`, `Bwd Packet Length Max`) and `min_seg_size_forward`. Whether the attacker should control more features is a threat-model decision for M5–M6; without any evasions, retraining has nothing to learn from.
 
+## M5 / M6: golden set, harness and the five-agent system
+
+M4 is the single-agent baseline above. M5 and M6 add a fixed evaluation set, an automated harness,
+and the multi-agent treatment. The full write-up is in [`REPORT.md`](REPORT.md).
+
+```
+python src/golden.py --check                       # verify the frozen golden set (21 cases + 20 triage flows)
+python src/evaluate.py --conditions random         # real reference, no API key
+python src/evaluate.py --mock                       # end-to-end pipeline test, no API key (not results)
+python src/evaluate.py --conditions single multi --seeds 0 1 2   # LLM conditions (needs .env)
+```
+
+Results are written to `results/results.json` and `results/results_table.md` (one column per
+condition, mean ± sd over the three seeds). Single runs with readable output: add `--golden` to
+`single_agent.py` or run `multi_agent.py --golden`.
+
+**Threat model (M5).** At most 5 of the 9 controllable features per attempt, each within ×4 of the
+original and inside the 1st–99th percentile — within the natural per-type spread of real attacks, so
+a variant stays a working attack of its class. This is set once in the harness and applied to every
+condition and seed.
+
+### Run on Google Colab
+
+```python
+!git clone https://github.com/noor-alqahtani-01/nids-single-agent-baseline.git
+%cd nids-single-agent-baseline
+!pip install -q -r requirements.txt
+import os; os.environ["LLM_API_KEY"] = "PASTE_YOUR_GEMINI_KEY"   # or write .env
+os.environ["LLM_BASE_URL"] = "https://generativelanguage.googleapis.com/v1beta/openai"
+os.environ["LLM_MODEL"] = "gemini-3.5-flash-lite"
+!python src/evaluate.py --conditions random          # check it runs (no key needed)
+!python src/evaluate.py --conditions single multi --seeds 0 1 2
+!cat results/results_table.md
+```
+
+If a free-tier daily quota runs out mid-run, the harness stops and reports; switch `LLM_MODEL` or
+enable billing (the whole study is a few thousand calls, about US$1–2) and re-run.
+
 ## Static detector reference
 
 The static detector from M2 (trained once on the full data, no adaptation) can also be run alone:

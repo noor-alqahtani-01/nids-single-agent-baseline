@@ -1,0 +1,339 @@
+{
+  "golden_manifest": {
+    "description": "M5 golden set (see src/golden.py for selection rules)",
+    "source": "data/working/test.csv.gz (held-out CICIDS2017 flows)",
+    "selection_seed": 2026,
+    "eval_seeds": [
+      0,
+      1,
+      2
+    ],
+    "attack_cases": {
+      "file": "attack_cases.csv",
+      "rows": 21,
+      "sha256": "459aea51650f23d515e0d1ad370cc45f0dcb957eee567781432a66148f50e0a7",
+      "per_type": {
+        "DDoS": 3,
+        "DoS Hulk": 3,
+        "DoS GoldenEye": 3,
+        "DoS slowloris": 3,
+        "DoS Slowhttptest": 3,
+        "FTP-Patator": 3,
+        "SSH-Patator": 3
+      },
+      "rounds": 3
+    },
+    "triage_flows": {
+      "file": "triage_flows.csv",
+      "rows": 20,
+      "sha256": "ec7fdef776ca24ef53681b2fbf8918027e9828c1368cb09db75bc96d01deae0e",
+      "labels": {
+        "BENIGN": 8,
+        "DoS Hulk": 2,
+        "DoS slowloris": 2,
+        "DoS GoldenEye": 2,
+        "DDoS": 2,
+        "DoS Slowhttptest": 2,
+        "SSH-Patator": 1,
+        "FTP-Patator": 1
+      }
+    },
+    "reference_rubric": {
+      "T1498": {
+        "severity": "critical",
+        "response_keywords": [
+          "rate-limit",
+          "rate limit",
+          "scrub",
+          "upstream",
+          "isp",
+          "cdn",
+          "mitigat",
+          "blackhole",
+          "null-route",
+          "anti-ddos",
+          "ddos protection"
+        ]
+      },
+      "T1499": {
+        "severity": "high",
+        "response_keywords": [
+          "block",
+          "firewall",
+          "rate-limit",
+          "rate limit",
+          "timeout",
+          "waf",
+          "connection limit",
+          "throttl",
+          "drop"
+        ]
+      },
+      "T1110": {
+        "severity": "high",
+        "response_keywords": [
+          "lock",
+          "block",
+          "ban",
+          "fail2ban",
+          "mfa",
+          "2fa",
+          "password",
+          "disable",
+          "credential"
+        ]
+      },
+      "T1190": {
+        "severity": "critical",
+        "response_keywords": [
+          "patch",
+          "isolate",
+          "update",
+          "upgrade",
+          "revoke"
+        ]
+      }
+    }
+  },
+  "seeds": [
+    0,
+    1,
+    2
+  ],
+  "mock": false,
+  "threat_model": {
+    "max_features_per_attempt": 5,
+    "max_factor": 4.0
+  },
+  "summary": {
+    "random": {
+      "esr": {
+        "mean": 0.044,
+        "std": 0.014
+      },
+      "cases_evaded": {
+        "mean": 3.333,
+        "std": 0.943
+      },
+      "atfe": {
+        "mean": 4.524,
+        "std": 0.202
+      },
+      "convergence_round": {
+        "mean": 3,
+        "std": 0.0
+      },
+      "test_f1": {
+        "mean": 0.999,
+        "std": 0.0
+      },
+      "test_precision": {
+        "mean": 0.998,
+        "std": 0.0
+      },
+      "test_recall": {
+        "mean": 0.999,
+        "std": 0.0
+      },
+      "test_fpr": {
+        "mean": 0.002,
+        "std": 0.0
+      },
+      "triage_recall": {
+        "mean": 1.0,
+        "std": 0.0
+      },
+      "severity_accuracy": {
+        "mean": 1.0,
+        "std": 0.0
+      },
+      "response_validity": {
+        "mean": 1.0,
+        "std": 0.0
+      },
+      "llm_calls": {
+        "mean": 0,
+        "std": 0.0
+      },
+      "total_tokens": {
+        "mean": 0,
+        "std": 0.0
+      },
+      "cost_usd": {
+        "mean": 0.0,
+        "std": 0.0
+      },
+      "llm_seconds": {
+        "mean": 0.0,
+        "std": 0.0
+      },
+      "wall_seconds": {
+        "mean": 16.367,
+        "std": 0.236
+      },
+      "failed_on_immutable_feature": {
+        "mean": 56,
+        "std": 1.633
+      },
+      "tool_errors": {
+        "mean": 3,
+        "std": 0.0
+      },
+      "mer_vs_random": 1.0
+    }
+  },
+  "per_seed": {
+    "random": [
+      {
+        "esr": 0.0533,
+        "cases_evaded": 4,
+        "cases_total": 21,
+        "atfe": 4.381,
+        "atfe_list": [
+          5,
+          5,
+          5,
+          5,
+          5,
+          1,
+          5,
+          1,
+          5,
+          4,
+          5,
+          5,
+          5,
+          5,
+          5,
+          1,
+          5,
+          5,
+          5,
+          5,
+          5
+        ],
+        "convergence_round": 3,
+        "test_f1": 0.9987,
+        "test_precision": 0.998,
+        "test_recall": 0.9994,
+        "test_fpr": 0.002,
+        "llm_calls": 0,
+        "total_tokens": 0,
+        "cost_usd": 0.0,
+        "llm_seconds": 0.0,
+        "wall_seconds": 16.2,
+        "tool_errors": 3,
+        "failed_attempts": 71,
+        "failed_on_immutable_feature": 56,
+        "detect_tp": 12,
+        "detect_fp": 0,
+        "detect_fn": 0,
+        "detect_tn": 8,
+        "triage_precision": 1.0,
+        "triage_recall": 1.0,
+        "severity_accuracy": 1.0,
+        "response_validity": 1.0
+      },
+      {
+        "esr": 0.0533,
+        "cases_evaded": 4,
+        "cases_total": 21,
+        "atfe": 4.381,
+        "atfe_list": [
+          5,
+          5,
+          5,
+          5,
+          5,
+          5,
+          5,
+          1,
+          5,
+          5,
+          5,
+          5,
+          5,
+          5,
+          1,
+          1,
+          5,
+          5,
+          5,
+          5,
+          4
+        ],
+        "convergence_round": 3,
+        "test_f1": 0.9985,
+        "test_precision": 0.9977,
+        "test_recall": 0.9993,
+        "test_fpr": 0.0023,
+        "llm_calls": 0,
+        "total_tokens": 0,
+        "cost_usd": 0.0,
+        "llm_seconds": 0.0,
+        "wall_seconds": 16.7,
+        "tool_errors": 3,
+        "failed_attempts": 71,
+        "failed_on_immutable_feature": 54,
+        "detect_tp": 12,
+        "detect_fp": 0,
+        "detect_fn": 0,
+        "detect_tn": 8,
+        "triage_precision": 1.0,
+        "triage_recall": 1.0,
+        "severity_accuracy": 1.0,
+        "response_validity": 1.0
+      },
+      {
+        "esr": 0.0244,
+        "cases_evaded": 2,
+        "cases_total": 21,
+        "atfe": 4.81,
+        "atfe_list": [
+          5,
+          5,
+          5,
+          5,
+          5,
+          3,
+          5,
+          5,
+          5,
+          5,
+          5,
+          5,
+          5,
+          5,
+          5,
+          5,
+          3,
+          5,
+          5,
+          5,
+          5
+        ],
+        "convergence_round": 3,
+        "test_f1": 0.9987,
+        "test_precision": 0.9979,
+        "test_recall": 0.9995,
+        "test_fpr": 0.0021,
+        "llm_calls": 0,
+        "total_tokens": 0,
+        "cost_usd": 0.0,
+        "llm_seconds": 0.0,
+        "wall_seconds": 16.2,
+        "tool_errors": 3,
+        "failed_attempts": 80,
+        "failed_on_immutable_feature": 58,
+        "detect_tp": 12,
+        "detect_fp": 0,
+        "detect_fn": 0,
+        "detect_tn": 8,
+        "triage_precision": 1.0,
+        "triage_recall": 1.0,
+        "severity_accuracy": 1.0,
+        "response_validity": 1.0
+      }
+    ]
+  }
+}
